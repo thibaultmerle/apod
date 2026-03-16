@@ -1,1 +1,3 @@
 /__pycache__
+/pic/*
+!/pic/example.jpg

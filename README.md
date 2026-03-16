@@ -1,5 +1,9 @@
 # APOD Wallpaper Overlay
 
+<p align="center">
+  <img src="pic/example.jpg" alt="APOD Wallpaper Overlay Example" width="800">
+</p>
+
 A standalone automated tool designed for **Linux** systems using the **GNOME Desktop Environment**. It automatically downloads the [NASA Astronomy Picture of the Day (APOD)](https://apod.nasa.gov/), generates high-quality information overlays, and updates the desktop background.
 
 ## Overview
