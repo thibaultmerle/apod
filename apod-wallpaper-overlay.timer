@@ -1,0 +1,10 @@
+[Unit]
+Description=Update APOD Wallpaper Overlay Every 4 Hours
+
+[Timer]
+OnCalendar=*-*-* 00,04,08,12,16,20:00:00
+OnBootSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

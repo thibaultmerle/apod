@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply APOD Overlay on Wallpaper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/tmerle/dev/apod/apod_wallpaper_overlay.py
+
+[Install]
+WantedBy=multi-user.target
