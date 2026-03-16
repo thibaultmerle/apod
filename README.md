@@ -1,6 +1,6 @@
 # APOD Wallpaper Overlay
 
-A standalone automated tool designed for **Linux** systems using the **GNOME Desktop Environment**. It automatically downloads the NASA Astronomy Picture of the Day (APOD), generates high-quality information overlays, and updates the desktop background.
+A standalone automated tool designed for **Linux** systems using the **GNOME Desktop Environment**. It automatically downloads the [NASA Astronomy Picture of the Day (APOD)](https://apod.nasa.gov/), generates high-quality information overlays, and updates the desktop background.
 
 ## Overview
 
@@ -12,10 +12,16 @@ The application performs the following automated tasks:
 
 ## Installation
 
-To initialize the application and its dependencies, execute the provided setup script:
+To initialize the application and its dependencies, first clone the repository and navigate into the project directory:
 
 ```bash
-cd ~/dev/apod
+git clone https://github.com/thibaultmerle/apod.git
+cd apod
+```
+
+Then, execute the provided setup script:
+
+```bash
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -35,10 +41,10 @@ The script supports manual execution for immediate updates or for retrieving spe
 
 ```bash
 # Update to the current day's APOD
-python3 ~/dev/apod/apod_wallpaper_overlay.py
+python3 ./apod_wallpaper_overlay.py
 
 # Retrieve a specific date (Format: YYYYMMDD)
-python3 ~/dev/apod/apod_wallpaper_overlay.py 20240101
+python3 ./apod_wallpaper_overlay.py 20240101
 ```
 
 ## System Integration
