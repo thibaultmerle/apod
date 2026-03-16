@@ -96,3 +96,7 @@ The application's execution pipeline is designed for reliability and visual prec
 4.  **Rendering Pipeline**: Overlays are generated using the ImageMagick Pango engine to leverage professional typography standards. Rendering is performed at an internal high resolution (governed by `RESOLUTION_SCALE`) to achieve superior anti-aliasing through super-sampling.
 5.  **Composition**: The final composite is produced using Lanczos downsampling, preserving sharp edge definition and text clarity on the destination display.
 6.  **Storage Maintenance**: An automated routine enforces the disk quota specified in `MAX_STORAGE_MB` within the `pic/` directory, identifying and purging the least recently modified assets to optimize storage utilization.
+
+## Credits
+
+Developed and refined by **Thibault Merle** in collaboration with **Antigravity** (Google DeepMind's AI Coding Assistant).
