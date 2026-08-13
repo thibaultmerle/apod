@@ -86,7 +86,7 @@ The application includes a standard demonstration key. For production use or to 
 *   `open_apod.py`: Helper utility to launch the NASA documentation for the current image.
 *   `pic/`: Local repository for source images and generated composites.
 *   `setup.sh`: Automated installation and configuration utility.
-*   `apod-wallpaper-overlay.*`: Systemd timer and service конфигурации.
+*   `apod-wallpaper-overlay.*`: Systemd timer and service configurations.
 
 ## Technical Implementation
 

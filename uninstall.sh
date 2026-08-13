@@ -40,8 +40,8 @@ echo ""
 read -p "Remove output directory ~/dev/apod/pic? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    rm -rf ~/dev/apod/pic
-    echo "✓ Removed output directory"
+    find ~/dev/apod/pic -mindepth 1 ! -name 'example.jpg' -delete
+    echo "✓ Emptyed output directory (kept example.jpg)"
 else
     echo "⊘ Kept output directory"
 fi

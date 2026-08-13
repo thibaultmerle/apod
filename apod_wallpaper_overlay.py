@@ -509,8 +509,8 @@ def cleanup_directory(directory, max_size_mb):
         for f in os.listdir(directory):
             path = os.path.join(directory, f)
             if os.path.isfile(path):
-                # Skip the json cache file
-                if f.endswith('.json'):
+                # Skip the json cache file and example.jpg
+                if f.endswith('.json') or f == 'example.jpg':
                     continue
                     
                 size = os.path.getsize(path)
