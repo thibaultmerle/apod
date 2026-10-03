@@ -108,38 +108,49 @@ def set_wallpaper(image_path):
 
 def enrich_apod_if_broken(data, query_date):
     """
-    Workaround for NASA API backend bug returning the site logo placeholder.
-    Scrapes the actual high-res image and title directly from science.nasa.gov.
+    Workaround for NASA API backend bug returning the site logo placeholder
+    or generic placeholder/canned metadata.
+    Scrapes the actual high-res image, title, and explanation directly from science.nasa.gov.
     """
-    if not data or ("nasa-logo" not in data.get("url", "") and data.get("title") != "NASA Science"):
+    is_broken_logo = "nasa-logo" in data.get("url", "")
+    is_broken_title = data.get("title") == "NASA Science"
+    is_canned_exp = "Curiosity Rover recorded this selfie" in data.get("explanation", "") and query_date != "2026-10-03"
+
+    if not data or (not is_broken_logo and not is_broken_title and not is_canned_exp):
         return data
 
-    print(f"   Detected NASA site logo placeholder for {query_date}; resolving real article...")
+    print(f"   Detected placeholder/buggy metadata for {query_date}; resolving real article from web...")
+    if is_canned_exp or is_broken_title:
+        data["explanation"] = ""
+
     dt = datetime.strptime(query_date, "%Y-%m-%d")
     today_str = datetime.now().strftime("%Y-%m-%d")
     article_url = None
 
     try:
-        # 1. If today, check the main APOD page
+        # 1. If today, find article link from main APOD page
         if query_date == today_str:
             r = requests.get("https://science.nasa.gov/apod/", timeout=10)
             if r.status_code == 200:
-                img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r.text)
-                title_m = re.search(r'<h2[^>]*class="[^"]*display-48[^"]*"[^>]*>([^<]+)</h2>', r.text)
-                if img_m and title_m:
-                    data["url"] = data["hdurl"] = img_m.group(1).split("?")[0]
-                    data["title"] = title_m.group(1).strip()
-                    print(f"   Discovered full image: {data['url']}")
-                    print(f"   Discovered title: {data['title']}")
-                    return data
+                art_m = re.search(r'href="(https://science\.nasa\.gov/image-article/apod-[^"]+)"', r.text)
+                if art_m:
+                    article_url = art_m.group(1).rstrip("/") + "/"
+                else:
+                    img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r.text)
+                    title_m = re.search(r'<h2[^>]*class="[^"]*display-48[^"]*"[^>]*>([^<]+)</h2>', r.text)
+                    if img_m and title_m:
+                        data["url"] = data["hdurl"] = img_m.group(1).split("?")[0]
+                        data["title"] = title_m.group(1).strip()
+                        return data
 
         # 2. Check recent archive (covers last ~30 days)
-        r_arch = requests.get("https://science.nasa.gov/apod/archive/", timeout=10)
-        if r_arch.status_code == 200:
-            pat = rf'https://science\.nasa\.gov/image-article/apod-{dt.year}-{dt.strftime("%B").lower()}-{dt.day}-[^\"]+/'
-            match = re.search(pat, r_arch.text, re.IGNORECASE)
-            if match:
-                article_url = match.group(0).rstrip("/") + "/"
+        if not article_url:
+            r_arch = requests.get("https://science.nasa.gov/apod/archive/", timeout=10)
+            if r_arch.status_code == 200:
+                pat = rf'https://science\.nasa\.gov/image-article/apod-{dt.year}-{dt.strftime("%B").lower()}-{dt.day}-[^\"]+/'
+                match = re.search(pat, r_arch.text, re.IGNORECASE)
+                if match:
+                    article_url = match.group(0).rstrip("/") + "/"
 
         # 3. If not in recent archive, use classic APOD redirect (covers all dates back to 1995)
         if not article_url:
@@ -151,11 +162,14 @@ def enrich_apod_if_broken(data, query_date):
                 # Classic HTML fallback (true apod.nasa.gov page)
                 img_m = re.search(r'<a\s+href="([^"]+\.(?:jpg|png|gif))"', r_classic.text, re.IGNORECASE)
                 title_m = re.search(r'<title>APOD:\s*[^–-]+[–-]\s*([^<-]+)', r_classic.text)
+                exp_m = re.search(r'<b>\s*Explanation:\s*</b>\s*(.*?)(?:<p>|<b>|</td>)', r_classic.text, re.DOTALL | re.IGNORECASE)
                 if img_m:
                     img_path = img_m.group(1)
                     data["url"] = data["hdurl"] = img_path if img_path.startswith("http") else f"https://apod.nasa.gov/apod/{img_path}"
                 if title_m:
-                    data["title"] = title_m.group(1).strip()
+                    data["title"] = html.unescape(title_m.group(1).strip())
+                if exp_m:
+                    data["explanation"] = " ".join(html.unescape(re.sub(r'<[^>]+>', '', exp_m.group(1))).split())
                 if img_m:
                     return data
 
@@ -170,17 +184,26 @@ def enrich_apod_if_broken(data, query_date):
                 title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', r_art.text)
                 if not title_m:
                     title_m = re.search(r'<title>APOD:\s*[^–-]+[–-]\s*([^<-]+)', r_art.text)
-                exp_m = re.search(r'<strong>Explanation:</strong>\s*(.*?)(?:<br\s*/?>\s*<strong>|</div>)', r_art.text, re.DOTALL)
+
+                exp_m = re.search(r'<(?:strong|b)>\s*Explanation:\s*</(?:strong|b)>\s*(.*?)(?:<br\s*/?>\s*<br\s*/?>\s*<(?:strong|b)>|</p>|</div>)', r_art.text, re.DOTALL | re.IGNORECASE)
+                if not exp_m:
+                    exp_m = re.search(r'Explanation:\s*</(?:strong|b)>\s*(.*?)(?:<br\s*/?>\s*<br\s*/?>\s*<(?:strong|b)>|</p>|</div>)', r_art.text, re.DOTALL | re.IGNORECASE)
+
+                credit_m = re.search(r'<th[^>]*>\s*Credit\s*(?:&amp;|&)\s*Copyright\s*</th>\s*<td[^>]*>(.*?)</td>', r_art.text, re.DOTALL | re.IGNORECASE)
 
                 if img_m:
                     clean_img = img_m.group(1).split("?")[0].replace("/jcr:content/renditions/cq5dam.web.1280.1280.jpeg", "")
                     data["url"] = data["hdurl"] = clean_img
                     print(f"   Discovered full image: {data['url']}")
                 if title_m:
-                    data["title"] = title_m.group(1).strip()
+                    data["title"] = html.unescape(title_m.group(1).strip())
                     print(f"   Discovered title: {data['title']}")
                 if exp_m:
-                    data["explanation"] = re.sub(r"<[^>]+>", "", exp_m.group(1)).strip()
+                    clean_exp = html.unescape(re.sub(r'<[^>]+>', '', exp_m.group(1))).strip()
+                    data["explanation"] = " ".join(clean_exp.split())
+                    print(f"   Discovered explanation: {data['explanation'][:80]}...")
+                if credit_m:
+                    data["copyright"] = " ".join(html.unescape(re.sub(r'<[^>]+>', '', credit_m.group(1))).split())
     except Exception as e:
         print(f"   Could not scrape web page fallback: {e}")
     return data
@@ -195,7 +218,8 @@ def fetch_apod_data(target_date=None, fallback_to_cache=False, verbose=True):
         try:
             with open(DATA_CACHE) as f:
                 cached = json.load(f)
-                if cached.get("date") == query_date and "nasa-logo" not in cached.get("url", "") and cached.get("title") != "NASA Science":
+                is_canned = "Curiosity Rover recorded this selfie" in cached.get("explanation", "") and query_date != "2026-10-03"
+                if cached.get("date") == query_date and "nasa-logo" not in cached.get("url", "") and cached.get("title") != "NASA Science" and not is_canned:
                     if verbose:
                         print(f"   Using cached APOD data for {query_date}")
                     return cached
