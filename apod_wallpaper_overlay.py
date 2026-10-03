@@ -17,8 +17,28 @@ import tempfile
 import argparse
 import html
 
-# NASA API key (you can get one from https://api.nasa.gov/)
-NASA_API_KEY = "DEMO_KEY"
+# NASA API key (you can get a free one from https://api.nasa.gov/)
+def get_nasa_api_key():
+    """Get NASA API key from environment, config file, or fallback to DEMO_KEY."""
+    if os.environ.get("NASA_API_KEY"):
+        return os.environ["NASA_API_KEY"].strip()
+    
+    config_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt"),
+        os.path.expanduser("~/.config/apod/api_key"),
+    ]
+    for path in config_paths:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r") as f:
+                    key = f.read().strip()
+                    if key:
+                        return key
+            except Exception:
+                pass
+    return "DEMO_KEY"
+
+NASA_API_KEY = get_nasa_api_key()
 
 # Configuration
 OUTPUT_DIR = os.path.expanduser("~/dev/apod/pic")
@@ -132,8 +152,68 @@ def set_wallpaper(image_path):
         print(f"Error setting wallpaper: {e}")
         return False
 
+def enrich_apod_if_broken(data, query_date):
+    """
+    If NASA API returns the site logo placeholder ('nasa-logo')
+    instead of the actual picture, scrape the real image and title from science.nasa.gov
+    """
+    if not data:
+        return data
+    url = data.get('url', '')
+    title = data.get('title', '')
+    if 'nasa-logo' in url or title == 'NASA Science':
+        print(f"   Detected NASA site logo placeholder for {query_date}; resolving real article...")
+        try:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            
+            # If query_date is today, check the main APOD page first
+            if query_date == today_str:
+                r_main = requests.get('https://science.nasa.gov/apod/', timeout=10)
+                if r_main.status_code == 200:
+                    import re
+                    img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r_main.text)
+                    title_m = re.search(r'<h2[^>]*class="[^"]*display-48[^"]*"[^>]*>([^<]+)</h2>', r_main.text)
+                    if img_m and title_m:
+                        clean_img = img_m.group(1).split('?')[0]
+                        data['url'] = clean_img
+                        data['hdurl'] = clean_img
+                        data['title'] = title_m.group(1).strip()
+                        print(f"   Discovered full image: {clean_img}")
+                        print(f"   Discovered title: {data['title']}")
+                        return data
+
+            # Search the archive for the specific date
+            dt = datetime.strptime(query_date, '%Y-%m-%d')
+            r_arch = requests.get('https://science.nasa.gov/apod/archive/', timeout=10)
+            if r_arch.status_code == 200:
+                import re
+                pattern = rf'https://science\.nasa\.gov/image-article/apod-{dt.year}-{dt.strftime("%B").lower()}-{dt.day}-[^\"]+/'
+                match = re.search(pattern, r_arch.text, re.IGNORECASE)
+                if match:
+                    target_article_url = match.group(0).rstrip('/') + '/'
+                    print(f"   Found archive article: {target_article_url}")
+                    r_art = requests.get(target_article_url, timeout=10)
+                    if r_art.status_code == 200:
+                        img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r_art.text)
+                        title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', r_art.text)
+                        exp_m = re.search(r'<strong>Explanation:</strong>\s*(.*?)(?:<br\s*/?>\s*<strong>|</div>)', r_art.text, re.DOTALL)
+                        
+                        if img_m:
+                            clean_img = img_m.group(1).split('?')[0]
+                            data['url'] = clean_img
+                            data['hdurl'] = clean_img
+                            print(f"   Discovered full image: {clean_img}")
+                        if title_m:
+                            data['title'] = title_m.group(1).strip()
+                            print(f"   Discovered title: {data['title']}")
+                        if exp_m:
+                            data['explanation'] = re.sub(r'<[^>]+>', '', exp_m.group(1)).strip()
+        except Exception as e:
+            print(f"   Could not scrape web page fallback: {e}")
+    return data
+
 def fetch_apod_data(target_date=None):
-    """Fetch APOD data from NASA API with local caching"""
+    """Fetch APOD data from NASA API with local caching and graceful fallbacks"""
     if target_date:
         query_date = target_date
     else:
@@ -144,58 +224,76 @@ def fetch_apod_data(target_date=None):
         try:
             with open(DATA_CACHE, 'r') as f:
                 cached_data = json.load(f)
-                if cached_data.get('date') == query_date:
+                if cached_data.get('date') == query_date and 'nasa-logo' not in cached_data.get('url', '') and cached_data.get('title') != 'NASA Science':
                     print(f"   Using cached APOD data for {query_date}")
                     return cached_data
         except Exception as e:
             print(f"Error reading cache: {e}")
 
-    # If no cache or cache is old, fetch from NASA
-    url = f"https://api.nasa.gov/planetary/apod?api_key={NASA_API_KEY}&thumbs=True"
-    if target_date:
-        url += f"&date={target_date}"
+    api_key = get_nasa_api_key()
+    # Always specify the date parameter because omitting it triggers a 500 error on NASA's servers
+    url_base = f"https://api.nasa.gov/planetary/apod?api_key={api_key}&date={query_date}"
     
-    max_retries = 5
-    retry_delay = 10 # seconds
+    max_retries = 2
+    retry_delay = 5 # seconds
     
     for attempt in range(max_retries):
-        try:
-            print(f"   Fetching fresh APOD data from NASA (Attempt {attempt + 1}/{max_retries})...")
-            response = requests.get(url, timeout=15)
-            
-            if response.status_code == 429:
-                print("\n❌ NASA API Rate Limit Exceeded (429 Error)")
-                print("   The 'DEMO_KEY' is very limited. Please get your own free API key")
-                print("   at https://api.nasa.gov/ and update NASA_API_KEY in the script.")
-                
-                # If we have any cached data at all, use it as a fallback even if old
-                if os.path.exists(DATA_CACHE):
-                    with open(DATA_CACHE, 'r') as f:
-                        print("   Falling back to last known cached data...")
-                        return json.load(f)
-                return None
-                
-            response.raise_for_status()
-            data = response.json()
-            
-            # Save to cache
+        # Try with thumbs=True first, then fallback to without thumbs if 500/error
+        for try_thumbs in [True, False]:
+            url = f"{url_base}&thumbs=True" if try_thumbs else url_base
             try:
-                with open(DATA_CACHE, 'w') as f:
-                    json.dump(data, f, indent=4)
-            except Exception as e:
-                print(f"Error saving cache: {e}")
+                print(f"   Fetching fresh APOD data from NASA for {query_date} (Attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(url, timeout=15)
                 
-            return data
-            
-        except (requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
-            print(f"   Network error (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                print(f"   Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                # Linear backoff
-                retry_delay += 10
-            else:
-                print("   Max retries reached.")
+                # If 400 (e.g., timezone difference where US NASA hasn't reached target date yet)
+                if response.status_code == 400 and not target_date:
+                    print("   Target date not yet available at NASA (timezone offset), falling back to yesterday...")
+                    from datetime import timedelta
+                    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                    return fetch_apod_data(yesterday)
+                
+                if response.status_code in (429, 500):
+                    print(f"\n⚠️  NASA API returned HTTP {response.status_code} ({'Rate Limit' if response.status_code == 429 else 'Server Error'})")
+                    if api_key == "DEMO_KEY":
+                        print("   The shared 'DEMO_KEY' is currently rate-limited on NASA's servers.")
+                        print("   You can get your own free API key instantly at: https://api.nasa.gov/")
+                        print("   Set it via environment variable: export NASA_API_KEY='your_key'")
+                        print("   or save it to ~/.config/apod/api_key or ~/dev/apod/api_key.txt\n")
+                    
+                    # If this was thumbs=True and gave 500, try next iteration without thumbs
+                    if try_thumbs:
+                        continue
+                    
+                    # If rate-limited / server error on both, fallback to cache immediately
+                    if os.path.exists(DATA_CACHE):
+                        with open(DATA_CACHE, 'r') as f:
+                            print("   Falling back to last known cached APOD data...")
+                            return json.load(f)
+                    return None
+                    
+                response.raise_for_status()
+                data = response.json()
+                
+                # Fix NASA backend bug where it returns site logo placeholder
+                data = enrich_apod_if_broken(data, query_date)
+                
+                # Save to cache
+                try:
+                    with open(DATA_CACHE, 'w') as f:
+                        json.dump(data, f, indent=4)
+                except Exception as e:
+                    print(f"Error saving cache: {e}")
+                    
+                return data
+                
+            except requests.exceptions.RequestException as e:
+                if not try_thumbs:
+                    print(f"   Network/API error (attempt {attempt + 1}): {e}")
+        
+        if attempt < max_retries - 1:
+            print(f"   Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay += 5
 
     # Try to return old cache as ultimate fallback
     if os.path.exists(DATA_CACHE):
@@ -203,7 +301,8 @@ def fetch_apod_data(target_date=None):
             with open(DATA_CACHE, 'r') as f:
                 print("   Using last available cached data due to network failure.")
                 return json.load(f)
-        except: pass
+        except Exception:
+            pass
     return None
 
 def download_apod_image(image_url, date_str):
@@ -212,8 +311,20 @@ def download_apod_image(image_url, date_str):
     local_path = os.path.join(OUTPUT_DIR, filename)
     
     if os.path.exists(local_path):
-        print(f"   Using cached APOD image: {local_path}")
-        return local_path
+        try:
+            with Image.open(local_path) as img:
+                w, h = img.size
+                if w < 300 or h < 300:
+                    print(f"   Cached image is a placeholder ({w}x{h}). Re-downloading...")
+                    os.remove(local_path)
+                else:
+                    print(f"   Using cached APOD image: {local_path}")
+                    return local_path
+        except Exception:
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
         
     print(f"   Downloading APOD image from: {image_url}")
     

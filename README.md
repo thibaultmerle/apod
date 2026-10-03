@@ -78,7 +78,11 @@ Customization of the rendered overlay can be achieved by modifying the configura
 | `UPDATE_FREQUENCY_HOURS` | Targeted frequency for background updates | 4 |
 
 ### API Authentication
-The application includes a standard demonstration key. For production use or to avoid rate limiting, users are encouraged to register for a personal API key at [api.nasa.gov](https://api.nasa.gov/) and update the `NASA_API_KEY` constant.
+The application defaults to NASA's shared `DEMO_KEY`, which has strict hourly rate limits. For reliable use, register for a free API key at [api.nasa.gov](https://api.nasa.gov/) (instant, no credit card required) and provide it via any of the following methods:
+
+- **Environment Variable**: `export NASA_API_KEY="your_api_key_here"` (or add to `~/.bashrc` / systemd environment)
+- **Config file**: Save your key in `~/.config/apod/api_key` or `~/dev/apod/api_key.txt`
+- **Code**: Edit `NASA_API_KEY` in `apod_wallpaper_overlay.py`
 
 ## Directory Structure
 
