@@ -41,7 +41,10 @@ This script will verify python dependencies, configure executable permissions, a
 
 ## Manual Execution and Testing
 
-The script supports manual execution for immediate updates or for retrieving specific historical dates.
+The script supports manual execution for immediate updates or for retrieving specific historical dates (format: `YYYYMMDD` or `YYYY-MM-DD`).
+
+> [!NOTE]
+> The very first APOD ever published was on **June 16, 1995** (`19950616` — *Neutron Star Earth*). The NASA APOD archive begins on this date; earlier dates are not available.
 
 ```bash
 # Update to the current day's APOD
@@ -49,6 +52,9 @@ python3 ./apod_wallpaper_overlay.py
 
 # Retrieve a specific date (Format: YYYYMMDD)
 python3 ./apod_wallpaper_overlay.py 20240101
+
+# Retrieve the very first APOD published by NASA (June 16, 1995)
+python3 ./apod_wallpaper_overlay.py 19950616
 ```
 
 ## System Integration
@@ -69,11 +75,11 @@ Customization of the rendered overlay can be achieved by modifying the configura
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `SCREEN_TITLE_SIZE` | Font size for the primary title in screen pixels | 20 |
-| `SCREEN_DATE_SIZE` | Font size for metadata and copyright in screen pixels | 12 |
-| `SCREEN_EXPLANATION_SIZE` | Font size for the description text in screen pixels | 12 |
-| `RESOLUTION_SCALE` | Super-sampling factor for enhanced text sharpness | 8 |
-| `PANEL_OPACITY` | Opacity level of the descriptive background panel | 0.92 |
+| `SCREEN_TITLE_SIZE` | Font size for the primary title in screen pixels | 24 |
+| `SCREEN_DATE_SIZE` | Font size for metadata and copyright in screen pixels | 14 |
+| `SCREEN_EXPLANATION_SIZE` | Font size for the description text in screen pixels | 13 |
+| `SCREEN_MARGIN` | Horizontal margin from screen edge in pixels | 25 |
+| `SCREEN_BOTTOM_COPYRIGHT` | Bottom margin from display edge in pixels | 35 |
 | `MAX_STORAGE_MB` | Maximum disk quota for the image repository in MB | 256 |
 | `UPDATE_FREQUENCY_HOURS` | Targeted frequency for background updates | 4 |
 
@@ -98,12 +104,13 @@ The application's execution pipeline is designed for reliability and visual prec
 
 1.  **Automation Cycle**: Background execution is managed via `systemd` user timers, checking for updates periodically (defined by `UPDATE_FREQUENCY_HOURS`) to ensure the desktop background syncs with the latest NASA release.
 2.  **Data Acquisition**: The script performs automated requests to the NASA APOD API to retrieve high-definition image assets and corresponding narrative metadata.
-3.  **Adaptive Geometric Scaling**: 
-    * The system queries GNOME configuration to detect active desktop scaling modes (e.g., `zoom`, `scaled`, `spanned`).
-    * It calculates exact screen-relative pixel margins based on real-time monitor resolution, ensuring consistent text positioning regardless of the source image's native aspect ratio or dimensions.
-4.  **Rendering Pipeline**: Overlays are generated using the ImageMagick Pango engine to leverage professional typography standards. Rendering is performed at an internal high resolution (governed by `RESOLUTION_SCALE`) to achieve superior anti-aliasing through super-sampling.
-5.  **Composition**: The final composite is produced using Lanczos downsampling, preserving sharp edge definition and text clarity on the destination display.
-6.  **Storage Maintenance**: An automated routine enforces the disk quota specified in `MAX_STORAGE_MB` within the `pic/` directory, identifying and purging the least recently modified assets to optimize storage utilization.
+3.  **Adaptive Screen-Resolution Compositing**: 
+    * The system queries the active display resolution via `xrandr` (e.g., 2560x1440) and GNOME scaling mode (`scaled`, `zoom`, `centered`, etc.).
+    * A native screen-sized canvas is generated, and the source APOD image is fitted onto this canvas using high-quality Lanczos resampling.
+4.  **Decoupled Typography Pipeline**: Overlays are rendered directly at native screen resolution using the ImageMagick Pango engine with subpixel anti-aliasing. Text quality and legibility are completely independent of source picture resolution or aspect ratio.
+5.  **Smart Side-Bar Layout & Contrast**: When pillarbox side bars exist (e.g. square or portrait images in `scaled` mode), the text neatly populates the side bar without obscuring the astronomical subject. For full-width images, an anti-contrast gradient plate guarantees effortless readability over bright celestial bodies.
+6.  **Missing Image Fallback**: If NASA has no picture for a requested day (e.g. text/video days, service outages, or dates outside available bounds), the script searches for and automatically selects the closest available day with a picture, explicitly notifying the user and noting the adjustment on the wallpaper.
+7.  **Storage Maintenance**: An automated routine enforces the disk quota specified in `MAX_STORAGE_MB` within the `pic/` directory, identifying and purging the least recently modified assets to optimize storage utilization.
 
 ## Credits
 

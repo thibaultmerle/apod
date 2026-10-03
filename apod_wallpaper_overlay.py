@@ -1,36 +1,49 @@
 #!/usr/bin/env python3
 """
 APOD Wallpaper Overlay
-Automatically composites APOD information overlay onto the current wallpaper
+Automatically composites NASA APOD information overlay onto your desktop wallpaper.
 """
 
-import requests
-import json
-from PIL import Image, ImageDraw, ImageFont
-from datetime import datetime
-import os
-import sys
-import time
-import subprocess
-import urllib.parse
-import tempfile
 import argparse
+from datetime import datetime, timedelta
 import html
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from PIL import Image
+import requests
 
-# NASA API key (you can get a free one from https://api.nasa.gov/)
+# Configuration
+OUTPUT_DIR = os.path.expanduser("~/dev/apod/pic")
+DATA_CACHE = os.path.join(OUTPUT_DIR, "apod_data.json")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Typography & Layout Configuration
+FONT_FAMILY = "DejaVu-Sans"
+SCREEN_TITLE_SIZE = 24
+SCREEN_DATE_SIZE = 14
+SCREEN_EXPLANATION_SIZE = 13
+SCREEN_MARGIN = 25
+SCREEN_BOTTOM_COPYRIGHT = 35
+MAX_STORAGE_MB = 256
+EARLIEST_APOD_DATE = datetime(1995, 6, 16).date()
+
+
 def get_nasa_api_key():
-    """Get NASA API key from environment, config file, or fallback to DEMO_KEY."""
+    """Retrieve NASA API key from environment, config file, or default to DEMO_KEY."""
     if os.environ.get("NASA_API_KEY"):
         return os.environ["NASA_API_KEY"].strip()
-    
-    config_paths = [
+    for path in [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt"),
         os.path.expanduser("~/.config/apod/api_key"),
-    ]
-    for path in config_paths:
+    ]:
         if os.path.isfile(path):
             try:
-                with open(path, "r") as f:
+                with open(path) as f:
                     key = f.read().strip()
                     if key:
                         return key
@@ -38,634 +51,590 @@ def get_nasa_api_key():
                 pass
     return "DEMO_KEY"
 
+
 NASA_API_KEY = get_nasa_api_key()
 
-# Configuration
-OUTPUT_DIR = os.path.expanduser("~/dev/apod/pic")
-DATA_CACHE = os.path.join(OUTPUT_DIR, "apod_data.json")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Rendering Configuration
-FONT_FAMILY = "DejaVu-Sans"
-SCREEN_TITLE_SIZE = 20       # Desired size in screen pixels
-SCREEN_DATE_SIZE = 12        # Desired size in screen pixels
-SCREEN_EXPLANATION_SIZE = 12 # Desired size in screen pixels
-RESOLUTION_SCALE = 8 # High quality super-sampling. Values > 8 may exhaust ImageMagick memory.
-MAX_STORAGE_MB = 256 # Limit for the pic directory
-UPDATE_FREQUENCY_HOURS = 4 # Reference value for systemd timer
-
-# Margins are now SCREEN RELATIVE (in screen pixels) to ensure consistent look
-# regardless of underlying image resolution or scaling.
-SCREEN_MARGIN = 15
-SCREEN_BOTTOM_COPYRIGHT = 30 # Distance from screen bottom
-SCREEN_BOTTOM_TEXT = 45      # Distance from screen bottom
-
-# Fallback margins for when screen resolution isn't detected (image pixels)
-FALLBACK_MARGIN = 15
-FALLBACK_BOTTOM_COPYRIGHT = 80
-FALLBACK_BOTTOM_TEXT = 100
-
-PANEL_OPACITY = 0.92 
 
 def get_screen_resolution():
-    """Get the primary screen resolution using xrandr"""
+    """Detect primary monitor or active display resolution using xrandr."""
     try:
-        # Run xrandr to get screen info
-        result = subprocess.run(['xrandr'], capture_output=True, text=True)
-        
-        # Look for the primary screen (marked with *)
-        for line in result.stdout.splitlines():
-            if '*' in line:
-                # Line format example: "   2560x1440     60.00*+"
-                parts = line.split()
-                res_part = parts[0] # "2560x1440"
-                if 'x' in res_part:
-                    w, h = map(int, res_part.split('x'))
-                    return w, h
-                    
-        # Fallback: try to find any resolution if no star found
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) > 0 and 'x' in parts[0]:
-                try:
-                    w, h = map(int, parts[0].split('x'))
-                    return w, h
-                except: continue
-                
-        return None
-    except Exception as e:
-        print(f"Error checking screen resolution: {e}")
-        return None 
+        res = subprocess.run(["xrandr"], capture_output=True, text=True, check=True)
+        # 1. Check for connected primary monitor mode
+        primary_match = re.search(r"connected primary (\d+)x(\d+)", res.stdout)
+        if primary_match:
+            return int(primary_match.group(1)), int(primary_match.group(2))
 
-def get_current_wallpaper():
-    """Get the current wallpaper path from GNOME settings"""
-    try:
-        result = subprocess.run(
-            ['gsettings', 'get', 'org.gnome.desktop.background', 'picture-uri'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        wallpaper_uri = result.stdout.strip().strip("'\"")
-        wallpaper_path = urllib.parse.unquote(wallpaper_uri.replace('file://', ''))
-        
-        # If the current wallpaper is already an apod overlay, find the original image
-        if "dev/apod/pic" in wallpaper_path or not os.path.exists(wallpaper_path):
-            cache_dir = os.path.expanduser("~/.cache/randomwallpaper@iflow.space/wallpapers/")
-            if os.path.exists(cache_dir):
-                # Find the most recently modified file that isn't an apod overlay
-                files = [os.path.join(cache_dir, f) for f in os.listdir(cache_dir) 
-                        if os.path.isfile(os.path.join(cache_dir, f))]
-                if files:
-                    # Sort by modification time
-                    files.sort(key=os.path.getmtime, reverse=True)
-                    return files[0]
-        
-        return wallpaper_path
+        # 2. Check for active display mode (marked with '*')
+        lines = res.stdout.splitlines()
+        for line in lines:
+            if "*" in line:
+                m = re.search(r"(\d+)x(\d+)", line)
+                if m:
+                    return int(m.group(1)), int(m.group(2))
+
+        # 3. Check for virtual screen current resolution
+        m = re.search(r"current\s+(\d+)\s+x\s+(\d+)", res.stdout)
+        if m:
+            return int(m.group(1)), int(m.group(2))
     except Exception as e:
-        print(f"Error resolving wallpaper path: {e}")
-        return None
+        print(f"   Warning: Could not detect screen resolution: {e}")
+    return None
+
 
 def get_picture_options():
-    """Get the current wallpaper scaling option (zoom, scaled, etc.)"""
+    """Get GNOME desktop background scaling option ('zoom', 'scaled', etc.)."""
     try:
-        result = subprocess.run(
-            ['gsettings', 'get', 'org.gnome.desktop.background', 'picture-options'],
-            capture_output=True,
-            text=True,
-            check=True
+        res = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.background", "picture-options"],
+            capture_output=True, text=True, check=True
         )
-        return result.stdout.strip().strip("'\"")
-    except Exception as e:
-        print(f"Error getting picture options: {e}")
-        return 'zoom' # Default fallback
+        return res.stdout.strip().strip("'\"")
+    except Exception:
+        return "zoom"
+
 
 def set_wallpaper(image_path):
-    """Set the GNOME wallpaper"""
+    """Set the GNOME desktop background for both light and dark modes."""
     try:
-        file_uri = f"file://{image_path}"
-        subprocess.run(['gsettings', 'set', 'org.gnome.desktop.background', 'picture-uri', file_uri], check=True)
-        subprocess.run(['gsettings', 'set', 'org.gnome.desktop.background', 'picture-uri-dark', file_uri], check=True)
-        print(f"Wallpaper set to: {image_path}")
+        uri = f"file://{os.path.abspath(image_path)}"
+        for key in ["picture-uri", "picture-uri-dark"]:
+            subprocess.run(["gsettings", "set", "org.gnome.desktop.background", key, uri], check=True)
+        print(f"   Wallpaper set to: {image_path}")
         return True
     except Exception as e:
-        print(f"Error setting wallpaper: {e}")
+        print(f"   Error setting wallpaper: {e}")
         return False
+
 
 def enrich_apod_if_broken(data, query_date):
     """
-    If NASA API returns the site logo placeholder ('nasa-logo')
-    instead of the actual picture, scrape the real image and title from science.nasa.gov
+    Workaround for NASA API backend bug returning the site logo placeholder.
+    Scrapes the actual high-res image and title directly from science.nasa.gov.
     """
-    if not data:
+    if not data or ("nasa-logo" not in data.get("url", "") and data.get("title") != "NASA Science"):
         return data
-    url = data.get('url', '')
-    title = data.get('title', '')
-    if 'nasa-logo' in url or title == 'NASA Science':
-        print(f"   Detected NASA site logo placeholder for {query_date}; resolving real article...")
-        try:
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            
-            # If query_date is today, check the main APOD page first
-            if query_date == today_str:
-                r_main = requests.get('https://science.nasa.gov/apod/', timeout=10)
-                if r_main.status_code == 200:
-                    import re
-                    img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r_main.text)
-                    title_m = re.search(r'<h2[^>]*class="[^"]*display-48[^"]*"[^>]*>([^<]+)</h2>', r_main.text)
-                    if img_m and title_m:
-                        clean_img = img_m.group(1).split('?')[0]
-                        data['url'] = clean_img
-                        data['hdurl'] = clean_img
-                        data['title'] = title_m.group(1).strip()
-                        print(f"   Discovered full image: {clean_img}")
-                        print(f"   Discovered title: {data['title']}")
-                        return data
 
-            # Search the archive for the specific date
-            dt = datetime.strptime(query_date, '%Y-%m-%d')
-            r_arch = requests.get('https://science.nasa.gov/apod/archive/', timeout=10)
-            if r_arch.status_code == 200:
-                import re
-                pattern = rf'https://science\.nasa\.gov/image-article/apod-{dt.year}-{dt.strftime("%B").lower()}-{dt.day}-[^\"]+/'
-                match = re.search(pattern, r_arch.text, re.IGNORECASE)
-                if match:
-                    target_article_url = match.group(0).rstrip('/') + '/'
-                    print(f"   Found archive article: {target_article_url}")
-                    r_art = requests.get(target_article_url, timeout=10)
-                    if r_art.status_code == 200:
-                        img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r_art.text)
-                        title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', r_art.text)
-                        exp_m = re.search(r'<strong>Explanation:</strong>\s*(.*?)(?:<br\s*/?>\s*<strong>|</div>)', r_art.text, re.DOTALL)
-                        
-                        if img_m:
-                            clean_img = img_m.group(1).split('?')[0]
-                            data['url'] = clean_img
-                            data['hdurl'] = clean_img
-                            print(f"   Discovered full image: {clean_img}")
-                        if title_m:
-                            data['title'] = title_m.group(1).strip()
-                            print(f"   Discovered title: {data['title']}")
-                        if exp_m:
-                            data['explanation'] = re.sub(r'<[^>]+>', '', exp_m.group(1)).strip()
-        except Exception as e:
-            print(f"   Could not scrape web page fallback: {e}")
+    print(f"   Detected NASA site logo placeholder for {query_date}; resolving real article...")
+    dt = datetime.strptime(query_date, "%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    article_url = None
+
+    try:
+        # 1. If today, check the main APOD page
+        if query_date == today_str:
+            r = requests.get("https://science.nasa.gov/apod/", timeout=10)
+            if r.status_code == 200:
+                img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/dynamicimage/assets/science/cds/apod/[^"]+)"', r.text)
+                title_m = re.search(r'<h2[^>]*class="[^"]*display-48[^"]*"[^>]*>([^<]+)</h2>', r.text)
+                if img_m and title_m:
+                    data["url"] = data["hdurl"] = img_m.group(1).split("?")[0]
+                    data["title"] = title_m.group(1).strip()
+                    print(f"   Discovered full image: {data['url']}")
+                    print(f"   Discovered title: {data['title']}")
+                    return data
+
+        # 2. Check recent archive (covers last ~30 days)
+        r_arch = requests.get("https://science.nasa.gov/apod/archive/", timeout=10)
+        if r_arch.status_code == 200:
+            pat = rf'https://science\.nasa\.gov/image-article/apod-{dt.year}-{dt.strftime("%B").lower()}-{dt.day}-[^\"]+/'
+            match = re.search(pat, r_arch.text, re.IGNORECASE)
+            if match:
+                article_url = match.group(0).rstrip("/") + "/"
+
+        # 3. If not in recent archive, use classic APOD redirect (covers all dates back to 1995)
+        if not article_url:
+            classic_url = f"https://apod.nasa.gov/apod/ap{dt.strftime('%y%m%d')}.html"
+            r_classic = requests.get(classic_url, timeout=10)
+            if r_classic.status_code == 200 and "image-article" in r_classic.url:
+                article_url = r_classic.url
+            elif r_classic.status_code == 200 and "apod.nasa.gov" in r_classic.url:
+                # Classic HTML fallback (true apod.nasa.gov page)
+                img_m = re.search(r'<a\s+href="([^"]+\.(?:jpg|png|gif))"', r_classic.text, re.IGNORECASE)
+                title_m = re.search(r'<title>APOD:\s*[^–-]+[–-]\s*([^<-]+)', r_classic.text)
+                if img_m:
+                    img_path = img_m.group(1)
+                    data["url"] = data["hdurl"] = img_path if img_path.startswith("http") else f"https://apod.nasa.gov/apod/{img_path}"
+                if title_m:
+                    data["title"] = title_m.group(1).strip()
+                if img_m:
+                    return data
+
+        # 4. If we resolved an image-article URL, parse it
+        if article_url:
+            print(f"   Found article: {article_url}")
+            r_art = requests.get(article_url, timeout=10)
+            if r_art.status_code == 200:
+                img_m = re.search(r'src="(https://assets\.science\.nasa\.gov/(?:dynamicimage/assets|content/dam)/science/cds/apod/[^"]+)"', r_art.text)
+                if not img_m:
+                    img_m = re.search(r'property="og:image"\s+content="(https://assets\.science\.nasa\.gov/[^"]+)"', r_art.text)
+                title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', r_art.text)
+                if not title_m:
+                    title_m = re.search(r'<title>APOD:\s*[^–-]+[–-]\s*([^<-]+)', r_art.text)
+                exp_m = re.search(r'<strong>Explanation:</strong>\s*(.*?)(?:<br\s*/?>\s*<strong>|</div>)', r_art.text, re.DOTALL)
+
+                if img_m:
+                    clean_img = img_m.group(1).split("?")[0].replace("/jcr:content/renditions/cq5dam.web.1280.1280.jpeg", "")
+                    data["url"] = data["hdurl"] = clean_img
+                    print(f"   Discovered full image: {data['url']}")
+                if title_m:
+                    data["title"] = title_m.group(1).strip()
+                    print(f"   Discovered title: {data['title']}")
+                if exp_m:
+                    data["explanation"] = re.sub(r"<[^>]+>", "", exp_m.group(1)).strip()
+    except Exception as e:
+        print(f"   Could not scrape web page fallback: {e}")
     return data
 
-def fetch_apod_data(target_date=None):
-    """Fetch APOD data from NASA API with local caching and graceful fallbacks"""
-    if target_date:
-        query_date = target_date
-    else:
-        query_date = datetime.now().strftime('%Y-%m-%d')
-    
-    # Check if we have a valid cache for the target date
+
+def fetch_apod_data(target_date=None, fallback_to_cache=False, verbose=True):
+    """Fetch APOD metadata from NASA API with local caching and fallbacks."""
+    query_date = target_date or datetime.now().strftime("%Y-%m-%d")
+
+    # Check local cache
     if os.path.exists(DATA_CACHE):
         try:
-            with open(DATA_CACHE, 'r') as f:
-                cached_data = json.load(f)
-                if cached_data.get('date') == query_date and 'nasa-logo' not in cached_data.get('url', '') and cached_data.get('title') != 'NASA Science':
-                    print(f"   Using cached APOD data for {query_date}")
-                    return cached_data
+            with open(DATA_CACHE) as f:
+                cached = json.load(f)
+                if cached.get("date") == query_date and "nasa-logo" not in cached.get("url", "") and cached.get("title") != "NASA Science":
+                    if verbose:
+                        print(f"   Using cached APOD data for {query_date}")
+                    return cached
         except Exception as e:
-            print(f"Error reading cache: {e}")
+            if verbose:
+                print(f"Error reading cache: {e}")
 
     api_key = get_nasa_api_key()
-    # Always specify the date parameter because omitting it triggers a 500 error on NASA's servers
     url_base = f"https://api.nasa.gov/planetary/apod?api_key={api_key}&date={query_date}"
-    
     max_retries = 2
-    retry_delay = 5 # seconds
-    
+    retry_delay = 3
+
     for attempt in range(max_retries):
-        # Try with thumbs=True first, then fallback to without thumbs if 500/error
         for try_thumbs in [True, False]:
             url = f"{url_base}&thumbs=True" if try_thumbs else url_base
             try:
-                print(f"   Fetching fresh APOD data from NASA for {query_date} (Attempt {attempt + 1}/{max_retries})...")
-                response = requests.get(url, timeout=15)
-                
-                # If 400 (e.g., timezone difference where US NASA hasn't reached target date yet)
-                if response.status_code == 400 and not target_date:
-                    print("   Target date not yet available at NASA (timezone offset), falling back to yesterday...")
-                    from datetime import timedelta
-                    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-                    return fetch_apod_data(yesterday)
-                
-                if response.status_code in (429, 500):
-                    print(f"\n⚠️  NASA API returned HTTP {response.status_code} ({'Rate Limit' if response.status_code == 429 else 'Server Error'})")
-                    if api_key == "DEMO_KEY":
-                        print("   The shared 'DEMO_KEY' is currently rate-limited on NASA's servers.")
-                        print("   You can get your own free API key instantly at: https://api.nasa.gov/")
-                        print("   Set it via environment variable: export NASA_API_KEY='your_key'")
-                        print("   or save it to ~/.config/apod/api_key or ~/dev/apod/api_key.txt\n")
-                    
-                    # If this was thumbs=True and gave 500, try next iteration without thumbs
+                if verbose:
+                    print(f"   Fetching fresh APOD data from NASA for {query_date} (Attempt {attempt + 1}/{max_retries})...")
+                res = requests.get(url, timeout=12)
+
+                # Timezone offset handling: if date not yet available, fallback to yesterday
+                if res.status_code == 400 and not target_date:
+                    if verbose:
+                        print("   Target date not yet available at NASA (timezone offset), falling back to yesterday...")
+                    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                    return fetch_apod_data(yesterday, fallback_to_cache=fallback_to_cache, verbose=verbose)
+
+                if res.status_code in (429, 500):
+                    if verbose:
+                        print(f"\n⚠️  NASA API returned HTTP {res.status_code} ({'Rate Limit' if res.status_code == 429 else 'Server Error'})")
                     if try_thumbs:
                         continue
-                    
-                    # If rate-limited / server error on both, fallback to cache immediately
-                    if os.path.exists(DATA_CACHE):
-                        with open(DATA_CACHE, 'r') as f:
-                            print("   Falling back to last known cached APOD data...")
+                    if fallback_to_cache and os.path.exists(DATA_CACHE):
+                        with open(DATA_CACHE) as f:
+                            if verbose:
+                                print("   Falling back to last known cached APOD data...")
                             return json.load(f)
                     return None
-                    
-                response.raise_for_status()
-                data = response.json()
-                
-                # Fix NASA backend bug where it returns site logo placeholder
-                data = enrich_apod_if_broken(data, query_date)
-                
-                # Save to cache
-                try:
-                    with open(DATA_CACHE, 'w') as f:
-                        json.dump(data, f, indent=4)
-                except Exception as e:
-                    print(f"Error saving cache: {e}")
-                    
-                return data
-                
-            except requests.exceptions.RequestException as e:
-                if not try_thumbs:
-                    print(f"   Network/API error (attempt {attempt + 1}): {e}")
-        
-        if attempt < max_retries - 1:
-            print(f"   Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-            retry_delay += 5
 
-    # Try to return old cache as ultimate fallback
-    if os.path.exists(DATA_CACHE):
+                res.raise_for_status()
+                data = enrich_apod_if_broken(res.json(), query_date)
+
+                if data and "nasa-logo" not in data.get("url", "") and data.get("title") != "NASA Science":
+                    try:
+                        with open(DATA_CACHE, "w") as f:
+                            json.dump(data, f, indent=4)
+                    except Exception as e:
+                        if verbose:
+                            print(f"Error saving cache: {e}")
+                return data
+
+            except requests.exceptions.RequestException as e:
+                if not try_thumbs and verbose:
+                    print(f"   Network/API error (attempt {attempt + 1}): {e}")
+
+        if attempt < max_retries - 1:
+            if verbose:
+                print(f"   Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay += 3
+
+    if fallback_to_cache and os.path.exists(DATA_CACHE):
         try:
-            with open(DATA_CACHE, 'r') as f:
-                print("   Using last available cached data due to network failure.")
+            with open(DATA_CACHE) as f:
+                if verbose:
+                    print("   Using last available cached data due to network failure.")
                 return json.load(f)
         except Exception:
             pass
     return None
 
+
+def resolve_media_url(apod_data):
+    """Extract valid image or thumbnail URL, handling video sources."""
+    if not apod_data:
+        return None
+    url = apod_data.get("hdurl") or apod_data.get("url")
+    if apod_data.get("media_type") == "video":
+        thumb = apod_data.get("thumbnail_url")
+        vid_url = apod_data.get("url", "")
+        if thumb and "nasa-logo" not in thumb:
+            return thumb
+        for pattern in [r"youtube\.com/embed/([^?&]+)", r"youtu\.be/([^?&]+)"]:
+            m = re.search(pattern, vid_url)
+            if m:
+                return f"https://img.youtube.com/vi/{m.group(1)}/maxresdefault.jpg"
+        if vid_url and any(vid_url.lower().endswith(ext) for ext in [".mp4", ".webm", ".ogg", ".mov", ".mkv"]):
+            return vid_url
+        return None
+    if not url or "nasa-logo" in url:
+        return None
+    return url
+
+
 def download_apod_image(image_url, date_str):
-    """Download the APOD image if not already cached"""
-    filename = f"apod_image_{date_str}.jpg"
-    local_path = os.path.join(OUTPUT_DIR, filename)
-    
+    """Download image or extract video frame, ensuring it is not a stale placeholder."""
+    if not image_url:
+        return None
+    local_path = os.path.join(OUTPUT_DIR, f"apod_image_{date_str}.jpg")
+
     if os.path.exists(local_path):
         try:
             with Image.open(local_path) as img:
-                w, h = img.size
-                if w < 300 or h < 300:
-                    print(f"   Cached image is a placeholder ({w}x{h}). Re-downloading...")
-                    os.remove(local_path)
-                else:
+                if img.width >= 100 and img.height >= 100:
                     print(f"   Using cached APOD image: {local_path}")
                     return local_path
+                print(f"   Cached image is a placeholder ({img.width}x{img.height}). Re-downloading...")
+                os.remove(local_path)
         except Exception:
             try:
                 os.remove(local_path)
             except Exception:
                 pass
-        
+
+    if "nasa-logo" in image_url:
+        print("   ERROR: Cannot download image (received NASA logo placeholder).")
+        return None
+
     print(f"   Downloading APOD image from: {image_url}")
-    
-    # Check if URL directly points to a video file
-    is_video_url = any(image_url.lower().endswith(ext) for ext in ['.mp4', '.webm', '.ogg', '.mov', '.mkv'])
-    if is_video_url:
-        print(f"   Extracting first frame from video...")
+    # Extract frame if directly linking to a video file
+    if any(image_url.lower().endswith(ext) for ext in [".mp4", ".webm", ".ogg", ".mov", ".mkv"]):
         try:
-            cmd = ['ffmpeg', '-y', '-i', image_url, '-vframes', '1', '-q:v', '2', local_path]
-            subprocess.run(cmd, check=True, capture_output=True)
-            print(f"   Video frame saved to: {local_path}")
+            subprocess.run(["ffmpeg", "-y", "-i", image_url, "-vframes", "1", "-q:v", "2", local_path],
+                           check=True, capture_output=True)
             return local_path
         except Exception as e:
             print(f"Error extracting video frame: {e}")
             return None
 
     try:
-        response = requests.get(image_url, timeout=30)
-        response.raise_for_status()
-        
-        with open(local_path, 'wb') as f:
-            f.write(response.content)
-            
+        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        res = requests.get(image_url, headers=headers, timeout=30)
+        res.raise_for_status()
+        with open(local_path, "wb") as f:
+            f.write(res.content)
+        with Image.open(local_path) as img:
+            img.verify()
         print(f"   Image saved to: {local_path}")
         return local_path
     except Exception as e:
         print(f"Error downloading image: {e}")
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
         return None
 
-def create_overlay_image(apod_data, base_image_size):
-    """Create a professional high-quality overlay using ImageMagick's Pango engine and super-sampling"""
-    width, height = base_image_size
-    
-    # Calculate dynamic resolution scale to prevent memory exhaustion
-    MAX_DIMENSION = 10000
-    max_side = max(width, height)
-    resolution_scale = RESOLUTION_SCALE # Start with default preference
-    
-    if max_side * resolution_scale > MAX_DIMENSION:
-        resolution_scale = MAX_DIMENSION / max_side
-        print(f"   Image too large for full supersampling. Reducing scale to {resolution_scale:.2f}x (Max dim: {MAX_DIMENSION})")
-    
-    # Ensure we don't scale down below 1.0 for the workspace
-    resolution_scale = max(1.0, resolution_scale)
 
-    # Internal high-res dimensions
-    sw = int(width * resolution_scale)
-    sh = int(height * resolution_scale)
-    
-    # Calculate adaptive positioning based on screen resolution
-    screen_res = get_screen_resolution()
-    
-    # Initialize default margins based on Image Pixels (fallback)
-    margin_right_img = FALLBACK_MARGIN
-    margin_bottom_copyright_img = FALLBACK_BOTTOM_COPYRIGHT
-    margin_bottom_text_img = FALLBACK_BOTTOM_TEXT
-    
-    # Adaptive adjustment vars
-    extra_bottom_visible = 0
-    extra_right_visible = 0
-    
-    scale = 1.0 # Default scale
-    
-    if screen_res:
-        screen_w, screen_h = screen_res
-        
-        # Get GNOME scaling mode
-        scaling_mode = get_picture_options()
-        print(f"   Desktop Scaling Mode: {scaling_mode}")
-        
-        # Default to 'zoom' behavior (Cover) if unknown
-        # Zoom: Scale = max(w_ratio, h_ratio). Cropping occurs.
-        # Scaled: Scale = min(w_ratio, h_ratio). No cropping (black bars).
-        
-        scale_w = screen_w / width
-        scale_h = screen_h / height
-        
-        if scaling_mode == 'scaled':
-             # Fit to screen (letterbox/pillarbox)
-             scale = min(scale_w, scale_h)
-             # In 'scaled' mode, the image is fully visible. No crop.
-             extra_right_visible = 0
-             extra_bottom_visible = 0
-             
-             # Note: If the image is pillarboxed (black bars on sides), the bottom of image == bottom of screen.
-             # If letterboxed (black bars top/bottom), the bottom of image < bottom of screen.
-             # But 'scaled' usually maximizes to touch at least one pair of edges.
-             
-        elif scaling_mode == 'spanned':
-             # Spans multiple monitors? Treat as 1:1 map to screen rect
-             scale = max(scale_w, scale_h) # Approx same as zoom for single screen logic
-             extra_right_visible = max(0, ((width * scale) - screen_w) / 2 / scale)
-             extra_bottom_visible = max(0, ((height * scale) - screen_h) / 2 / scale)
-             
-        else: 
-            # 'zoom' (default), 'wallpaper', 'centered', 'none'
-            # We assume 'zoom' behavior for calculations as it's the standard filling mode
-            scale = max(scale_w, scale_h)
-            
-            # Dimensions of the visible part of the image in image pixels
-            visible_w = screen_w / scale
-            visible_h = screen_h / scale
-            
-            # Calculate how much is cropped (assuming center crop)
-            total_crop_w = width - visible_w
-            total_crop_h = height - visible_h
-            
-            extra_right_visible = max(0, total_crop_w / 2)
-            extra_bottom_visible = max(0, total_crop_h / 2)
-        
-        # Now update the BASE margins to be screen-relative
-        # We want SCREEN_MARGIN pixels from the edge of the SCREEN.
-        # Convert screen pixels to image pixels: screen_px / scale
-        
-        margin_right_img = SCREEN_MARGIN / scale
-        margin_bottom_copyright_img = SCREEN_BOTTOM_COPYRIGHT / scale
-        margin_bottom_text_img = SCREEN_BOTTOM_TEXT / scale
-        
-        print(f"   Adapting overlay for screen {screen_w}x{screen_h}")
-        print(f"   Image: {width}x{height}")
-        print(f"   Scale: {scale:.4f}")
-        print(f"   Margins (img px): Right={int(margin_right_img)}, BottomText={int(margin_bottom_text_img)}")
-        print(f"   Crop Offset: Right={int(extra_right_visible)}, Bottom={int(extra_bottom_visible)}")
-    
+def create_overlay_image(apod_data, screen_size, side_bar_w=0, requested_date=None):
+    """Render high-resolution text and gradient overlay at native screen resolution."""
+    screen_w, screen_h = screen_size
+
+    # Limit text paragraph width when side bars exist (e.g. square/portrait pictures in 'scaled' mode).
+    # Otherwise, do not limit paragraph width (let it use the full available screen width).
+    if side_bar_w >= 100:
+        text_w = max(250, side_bar_w - SCREEN_MARGIN - 15)
     else:
-        print("   WARNING: Could not detect screen resolution. Using default fallback margins.")
+        text_w = max(300, screen_w - 2 * SCREEN_MARGIN)
 
-        # Combine visible crop/shift with the desired visual margin
-    final_margin_right_img = margin_right_img + extra_right_visible
-    # We only use one bottom margin now, for the whole block.
-    # We'll use the copyright margin as the base since it's the bottom-most element.
-    final_margin_bottom_img = margin_bottom_copyright_img + extra_bottom_visible
-
-    # Scale everything up for high-res rendering
-    # Font sizes are now adaptive: Desired Screen Size / Image Scale = Required Image Size
-    # Then multiplied by resolution_scale for the super-sampled canvas.
-    st_size = (SCREEN_TITLE_SIZE / scale) * resolution_scale
-    sd_size = (SCREEN_DATE_SIZE / scale) * resolution_scale
-    se_size = (SCREEN_EXPLANATION_SIZE / scale) * resolution_scale
-    
-    s_margin_right = final_margin_right_img * resolution_scale
-    s_margin_bottom = final_margin_bottom_img * resolution_scale
-    
-    # Prepare text data (escaping for Pango)
     def pango_escape(text):
-        if not text:
-            return ""
-        # IMPORTANT: ImageMagick 6's Pango coder un-escapes once before passing to Pango.
-        # This requires DOUBLE escaping for ampersands (& -> &amp;amp;).
-        # html.escape handles &, <, >, ", ' (converts & to &amp;)
-        escaped = html.escape(str(text))
-        # Now convert &amp; to &amp;amp; to handle IM6's double un-escaping
-        return escaped.replace('&amp;', '&amp;amp;')
+        return html.escape(str(text or "")).replace("&amp;", "&amp;amp;")
 
-    title = pango_escape(apod_data.get('title', 'Astronomy Picture of the Day'))
-    date_str = apod_data.get('date', '')
+    title = pango_escape(apod_data.get("title", "Astronomy Picture of the Day"))
+    date_str = apod_data.get("date", "")
     if date_str:
         try:
-            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-            date_str = date_obj.strftime('%B %d, %Y')
-        except: pass
+            date_str = datetime.strptime(date_str, "%Y-%m-%d").strftime("%B %d, %Y")
+        except Exception:
+            pass
+    if requested_date and requested_date != apod_data.get("date"):
+        date_str += f"  •  Closest available to {requested_date}"
     date_str = pango_escape(date_str)
-    explanation = pango_escape(apod_data.get('explanation', ''))
-    
-    raw_copyright = apod_data.get('copyright', '')
-    # Remove newlines and excess whitespace from copyright to force single line
-    if raw_copyright:
-        raw_copyright = ' '.join(raw_copyright.split())
-    copyright_text = pango_escape(raw_copyright)
-    
-    # We'll create the overlay using ImageMagick
+    explanation = pango_escape(apod_data.get("explanation", ""))
+    copyright_text = pango_escape(" ".join(apod_data.get("copyright", "").split()))
+
+    full_block = (
+        f'<span font="{FONT_FAMILY} Bold {SCREEN_TITLE_SIZE}" foreground="white">{title}</span>\n'
+        f'<span font="{FONT_FAMILY} Bold {SCREEN_DATE_SIZE}" foreground="#c8dcff">{date_str}</span>\n\n'
+        f'<span font="{FONT_FAMILY} {SCREEN_EXPLANATION_SIZE}" foreground="#e6e6e6">{explanation}</span>'
+    )
+    if copyright_text:
+        full_block += f'\n\n<span font="{FONT_FAMILY} {SCREEN_DATE_SIZE}" foreground="#b4b4b4">{copyright_text}</span>'
+
     with tempfile.TemporaryDirectory() as tmpdir:
         overlay_path = os.path.join(tmpdir, "overlay.png")
-        pango_markup_path = os.path.join(tmpdir, "markup.pango")
-        
-        # 1. Create the high-res text container width
-        # We determine the max width of the text block.
-        # It MUST NOT exceed the image width (sw) or it will be cropped.
-        visual_margin_hr = (SCREEN_MARGIN / scale) * resolution_scale
-        
-        if screen_res:
-             # Width of the visible image area in high-res pixels
-             s_visible_w = (screen_res[0] / scale) * resolution_scale
-             # We want a visual margin on BOTH sides of the text block
-             text_w = s_visible_w - (2 * visual_margin_hr)
+        cmd = ["convert", "-size", f"{screen_w}x{screen_h}", "canvas:none"]
+
+        # When overlaying on the picture (no side bars), add a gradient panel at the bottom for contrast
+        if side_bar_w < 100:
+            fade_h = int(screen_h * 0.22)
+            solid_h = int(screen_h * 0.12)
+            panel_y = screen_h - (fade_h + solid_h)
+            cmd.extend([
+                "(",
+                    "(", "-size", f"{screen_w}x{fade_h}", "gradient:none-rgba(0,0,0,0.92)", ")",
+                    "(", "-size", f"{screen_w}x{solid_h}", "xc:rgba(0,0,0,0.92)", ")",
+                    "-append",
+                ")",
+                "-geometry", f"+0+{panel_y}", "-composite"
+            ])
         else:
-             # Fallback
-             text_w = sw - (2 * visual_margin_hr)
-        
-        # CRITICAL FIX: The text block must fit inside the image dimensions (sw)
-        # Even if screen_res is large, the canvas is limited to sw.
-        text_w = min(text_w, sw - (2 * visual_margin_hr))
-        
-        # Ensure integer for ImageMagick command line
-        text_w = int(text_w)
-        st_size = int(st_size)
-        sd_size = int(sd_size)
-        se_size = int(se_size)
-        s_margin_right = int(s_margin_right)
-        s_margin_bottom = int(s_margin_bottom)
-        
-        # 1. Create the dark gradient panel
-        panel_height = int(sh * 0.75) 
-        panel_y = sh - panel_height
-        
-        # 2. Render everything in one go with ImageMagick at high res
-        # We build a final command that passes the markup as a direct string.
-        # ImageMagick 6 on some systems blocks the 'pango:@file' syntax.
-        
-        # Construct the single text block
-        # Using double quotes for attributes (escaped if needed)
-        full_block = f"<span font=\"{FONT_FAMILY} Bold {st_size}\" foreground=\"white\">{title}</span>\n"
-        full_block += f"<span font=\"{FONT_FAMILY} Bold {sd_size}\" foreground=\"#c8dcff\">{date_str}</span>\n\n"
-        full_block += f"<span font=\"{FONT_FAMILY} {se_size}\" foreground=\"#dddddd\">{explanation}</span>"
-        
-        if copyright_text:
-            full_block += f"\n\n<span font=\"{FONT_FAMILY} {sd_size}\" foreground=\"#b4b4b4\">{copyright_text}</span>"
-            
-        cmd = [
-            'convert',
-            '-size', f'{sw}x{sh}', 'canvas:none',
-            # Draw gradient panel
-            '(', '-size', f'{sw}x{panel_height}', 'gradient:black-none', '-rotate', '180', ')',
-            '-geometry', f'+0+{panel_y}', '-composite',
-            # Render the main text block
-            '-background', 'none',
-            '-fill', 'white',
-            '-gravity', 'SouthEast',
-            '-define', 'pango:align=right',
-            '-size', f'{text_w}x',
-            f'pango:{full_block}',
-            '-geometry', f'+{s_margin_right}+{s_margin_bottom}', '-composite',
-            # Final Step: Resize down to original resolution
-            '-resize', f'{width}x{height}',
+            # Side bar is already black, but a subtle vertical gradient ensures clean transition
+            panel_height = int(screen_h * 0.45)
+            panel_y = screen_h - panel_height
+            cmd.extend([
+                "(", "-size", f"{side_bar_w}x{panel_height}", "gradient:rgba(0,0,0,0.85)-none", "-rotate", "180", ")",
+                "-geometry", f"+{screen_w - side_bar_w}+{panel_y}", "-composite"
+            ])
+
+        cmd.extend([
+            "-background", "none", "-fill", "white", "-gravity", "SouthEast",
+            "-define", "pango:align=right", "-size", f"{text_w}x",
+            f"pango:{full_block}",
+            "-geometry", f"+{SCREEN_MARGIN}+{SCREEN_BOTTOM_COPYRIGHT}", "-composite",
             overlay_path
-        ]
-        
+        ])
+
         try:
             subprocess.run(cmd, check=True, capture_output=True)
-            return Image.open(overlay_path).convert('RGBA')
+            return Image.open(overlay_path).convert("RGBA")
         except subprocess.CalledProcessError as e:
             print(f"ImageMagick Error: {e.stderr.decode()}")
             return None
 
-def wrap_text(text, width):
-    """Not needed as ImageMagick Pango handles wrapping"""
-    return [text]
 
-def composite_overlay_on_wallpaper(wallpaper_path, apod_data, output_path):
-    """Composite the APOD overlay onto the wallpaper"""
+def composite_overlay_on_wallpaper(wallpaper_path, apod_data, output_path, requested_date=None):
+    """Composite the generated overlay onto a native screen-resolution wallpaper canvas."""
     try:
-        # Open the wallpaper
-        wallpaper = Image.open(wallpaper_path)
-        
-        # Convert to RGBA if needed
-        if wallpaper.mode != 'RGBA':
-            wallpaper = wallpaper.convert('RGBA')
-        
-        # Create the overlay
-        overlay = create_overlay_image(apod_data, wallpaper.size)
-        
-        # Composite the overlay onto the wallpaper
-        composited = Image.alpha_composite(wallpaper, overlay)
-        
-        # Convert back to RGB for saving as JPEG (if needed) or save as PNG
-        if output_path.endswith('.jpg') or output_path.endswith('.jpeg'):
-            composited = composited.convert('RGB')
-            composited.save(output_path, 'JPEG', quality=95)
+        base_img = Image.open(wallpaper_path).convert("RGBA")
+        img_w, img_h = base_img.size
+
+        screen_res = get_screen_resolution()
+        if not screen_res:
+            print("   Warning: Could not detect display resolution; defaulting to 1920x1080.")
+            screen_res = (1920, 1080)
+
+        screen_w, screen_h = screen_res
+        mode = get_picture_options()
+
+        # 1. Create native screen-resolution canvas
+        canvas = Image.new("RGBA", (screen_w, screen_h), (0, 0, 0, 255))
+        side_bar_w = 0
+
+        # 2. Scale and position the base APOD image onto the canvas
+        if mode == "scaled":
+            scale = min(screen_w / img_w, screen_h / img_h)
+            new_w, new_h = max(1, int(img_w * scale)), max(1, int(img_h * scale))
+            scaled_img = base_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            paste_x = (screen_w - new_w) // 2
+            paste_y = (screen_h - new_h) // 2
+            canvas.paste(scaled_img, (paste_x, paste_y))
+            right_bar = screen_w - (paste_x + new_w)
+            if right_bar >= 100:
+                side_bar_w = right_bar
+        elif mode == "centered":
+            paste_x = (screen_w - img_w) // 2
+            paste_y = (screen_h - img_h) // 2
+            canvas.paste(base_img, (paste_x, paste_y))
+            right_bar = screen_w - (paste_x + img_w)
+            if right_bar >= 100:
+                side_bar_w = right_bar
+        elif mode == "stretched":
+            scaled_img = base_img.resize((screen_w, screen_h), Image.Resampling.LANCZOS)
+            canvas.paste(scaled_img, (0, 0))
+        else:  # 'zoom', 'spanned', or default
+            scale = max(screen_w / img_w, screen_h / img_h)
+            new_w, new_h = max(1, int(img_w * scale)), max(1, int(img_h * scale))
+            scaled_img = base_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            crop_x = (new_w - screen_w) // 2
+            crop_y = (new_h - screen_h) // 2
+            canvas.paste(scaled_img.crop((crop_x, crop_y, crop_x + screen_w, crop_y + screen_h)), (0, 0))
+
+        # 3. Create native screen-resolution overlay
+        overlay = create_overlay_image(apod_data, (screen_w, screen_h), side_bar_w=side_bar_w, requested_date=requested_date)
+        if not overlay:
+            return False
+
+        # 4. Alpha composite onto screen canvas
+        composited = Image.alpha_composite(canvas, overlay)
+        if output_path.lower().endswith((".jpg", ".jpeg")):
+            composited.convert("RGB").save(output_path, "JPEG", quality=95)
         else:
-            composited.save(output_path, 'PNG')
-        
-        print(f"Composited image saved to: {output_path}")
+            composited.save(output_path, "PNG")
+
+        file_size = os.path.getsize(output_path)
+        size_str = f"{file_size / (1024 * 1024):.2f} MB" if file_size >= 1024 * 1024 else f"{file_size / 1024:.1f} KB"
+        print(f"   Desktop Scaling Mode: {mode} on {screen_w}x{screen_h}")
+        print(f"   Composited Dimensions: {screen_w}x{screen_h} ({size_str})")
+        print(f"   Composited image saved to: {output_path}")
         return True
     except Exception as e:
         print(f"Error compositing overlay: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
+
 def cleanup_directory(directory, max_size_mb):
-    """
-    Ensure the directory does not exceed max_size_mb.
-    Deletes oldest files first until the size is within the limit.
-    """
+    """Purge raw images and oldest wallpapers if total size exceeds max_size_mb quota."""
     print(f"\n5. Cleaning up directory: {directory}")
-    max_size_bytes = max_size_mb * 1024 * 1024
-    
+
+    # 1. Always purge any lingering raw images (keep only final composited wallpapers)
+    for f in os.listdir(directory):
+        if f.startswith("apod_image_") and f.endswith(".jpg"):
+            try:
+                os.remove(os.path.join(directory, f))
+            except Exception:
+                pass
+
+    max_bytes = max_size_mb * 1024 * 1024
     try:
-        # Get all files with their full paths and sizes
         files = []
-        total_size = 0
-        
         for f in os.listdir(directory):
-            path = os.path.join(directory, f)
-            if os.path.isfile(path):
-                # Skip the json cache file and example.jpg
-                if f.endswith('.json') or f == 'example.jpg':
-                    continue
-                    
-                size = os.path.getsize(path)
-                total_size += size
-                files.append((path, size, os.path.getmtime(path)))
-        
-        print(f"   Current size: {total_size / (1024*1024):.2f} MB (Limit: {max_size_mb} MB)")
-        
-        if total_size <= max_size_bytes:
+            if f.endswith(".json") or f == "example.jpg":
+                continue
+            p = os.path.join(directory, f)
+            if os.path.isfile(p):
+                files.append((p, os.path.getsize(p), os.path.getmtime(p)))
+
+        total_size = sum(sz for _, sz, _ in files)
+        print(f"   Current size: {total_size / (1024 * 1024):.2f} MB (Limit: {max_size_mb} MB)")
+        if total_size <= max_bytes:
             print("   Size is within limits. No cleanup needed.")
             return
 
-        # Sort by modification time (oldest first)
+        # Sort by mtime (oldest first), keeping at least the latest file
         files.sort(key=lambda x: x[2])
-        
-        deleted_count = 0
-        reclaimed_bytes = 0
-        
-        # Keep at least the 5 newest files regardless of size to prevent total wipeout in edge cases
-        # (Optional safety, but good practice. Given 256MB, this is plenty for 5 images)
-        files_to_keep = 1 
-        if len(files) > files_to_keep:
-            files_to_process = files[:-files_to_keep]
-        else:
-            files_to_process = []
+        to_delete = files[:-1] if len(files) > 1 else []
+        deleted = reclaimed = 0
 
-        for path, size, mtime in files_to_process:
-            if total_size <= max_size_bytes:
+        for path, size, _ in to_delete:
+            if total_size <= max_bytes:
                 break
-                
             try:
                 os.remove(path)
                 total_size -= size
-                reclaimed_bytes += size
-                deleted_count += 1
+                reclaimed += size
+                deleted += 1
                 print(f"   Deleted: {os.path.basename(path)}")
             except OSError as e:
                 print(f"   Error deleting {os.path.basename(path)}: {e}")
-                
-        print(f"   Cleanup complete. Deleted {deleted_count} files, reclaimed {reclaimed_bytes / (1024*1024):.2f} MB.")
-        print(f"   New size: {total_size / (1024*1024):.2f} MB")
-        
+
+        print(f"   Cleanup complete. Deleted {deleted} files, reclaimed {reclaimed / (1024 * 1024):.2f} MB.")
     except Exception as e:
         print(f"Error during cleanup: {e}")
+
+
+def try_get_apod(date_str, verbose=True):
+    """
+    Attempt to fetch APOD metadata and download the image for a given date.
+    Returns (apod_data, wallpaper_path) if successful, or (None, None) if unavailable.
+    """
+    data = fetch_apod_data(date_str, fallback_to_cache=(date_str is None), verbose=verbose)
+    if not data:
+        return None, None
+    image_url = resolve_media_url(data)
+    if not image_url:
+        return None, None
+    wallpaper_path = download_apod_image(image_url, data.get("date"))
+    if not wallpaper_path or not os.path.exists(wallpaper_path):
+        return None, None
+    return data, wallpaper_path
+
+
+def get_closest_apod_with_picture(target_date_str=None):
+    """
+    Retrieve APOD data and image for target_date_str.
+    If no valid picture is available for that day, search for and return
+    the closest day that has a valid picture.
+    Returns (apod_data, wallpaper_path, signed_offset).
+    """
+    today = datetime.now().date()
+
+    if target_date_str:
+        try:
+            req_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            req_date = today
+    else:
+        req_date = today
+        target_date_str = req_date.strftime("%Y-%m-%d")
+
+    # If requested date is before first APOD or in future, notify immediately
+    if req_date < EARLIEST_APOD_DATE:
+        print(f"\n⚠️  Requested date {target_date_str} is before the first APOD ({EARLIEST_APOD_DATE.strftime('%Y-%m-%d')}).")
+        print(f"   Selecting the earliest available APOD ({EARLIEST_APOD_DATE.strftime('%Y-%m-%d')})...")
+        req_date = EARLIEST_APOD_DATE
+        effective_target = req_date.strftime("%Y-%m-%d")
+        data, path = try_get_apod(effective_target, verbose=True)
+        if data and path:
+            return data, path, (req_date - datetime.strptime(target_date_str, "%Y-%m-%d").date()).days
+    elif req_date > today:
+        print(f"\n⚠️  Requested date {target_date_str} is in the future.")
+        print(f"   Searching backwards from today ({today.strftime('%Y-%m-%d')})...")
+        req_date = today
+
+    # 1. Try requested date first
+    current_date_str = req_date.strftime("%Y-%m-%d")
+    data, path = try_get_apod(current_date_str, verbose=True)
+    if data and path:
+        return data, path, 0
+
+    # 2. If no picture available for requested date, search for closest day
+    print(f"\n⚠️  No valid picture available for {target_date_str}.")
+    print("   Searching for the closest day with an available picture...")
+
+    max_search_days = 60
+    for offset in range(1, max_search_days + 1):
+        candidates = []
+        # Candidate 1: future (+offset days) if <= today
+        cand_future = req_date + timedelta(days=offset)
+        if cand_future <= today:
+            candidates.append((cand_future, offset))
+        # Candidate 2: past (-offset days) if >= EARLIEST_APOD_DATE
+        cand_past = req_date - timedelta(days=offset)
+        if cand_past >= EARLIEST_APOD_DATE:
+            candidates.append((cand_past, -offset))
+
+        # Prioritize locally cached wallpaper files at this distance
+        candidates.sort(
+            key=lambda item: not os.path.exists(
+                os.path.join(OUTPUT_DIR, f"apod_wallpaper_{item[0].strftime('%Y-%m-%d')}.png")
+            )
+        )
+
+        for cand_dt, cand_offset in candidates:
+            cand_str = cand_dt.strftime("%Y-%m-%d")
+            c_data, c_path = try_get_apod(cand_str, verbose=False)
+            if c_data and c_path:
+                days_diff = abs(cand_offset)
+                direction = "later" if cand_offset > 0 else "earlier"
+                days_word = f"{days_diff} day{'s' if days_diff > 1 else ''}"
+                print("\n" + "=" * 60)
+                print(f"👉 NO IMAGE AVAILABLE FOR {target_date_str}!")
+                print(f"   TAKING THE CLOSER AVAILABLE ONE: {cand_str} ({days_word} {direction})")
+                print("=" * 60 + "\n")
+                return c_data, c_path, cand_offset
+
+    return None, None, 0
+
 
 def main():
     parser = argparse.ArgumentParser(description="APOD Wallpaper Overlay")
@@ -675,95 +644,68 @@ def main():
     target_date_str = None
     if args.date:
         try:
-             # Validate and convert YYYYMMDD to YYYY-MM-DD
-             dt = datetime.strptime(args.date, "%Y%m%d")
-             target_date_str = dt.strftime("%Y-%m-%d")
-             print(f"   Target date: {target_date_str}")
+            target_date_str = datetime.strptime(args.date, "%Y%m%d").strftime("%Y-%m-%d")
+            print(f"   Target date: {target_date_str}")
         except ValueError:
-             print("ERROR: Date must be in YYYYMMDD format")
-             sys.exit(1)
+            print("ERROR: Date must be in YYYYMMDD format")
+            sys.exit(1)
 
     print("=" * 60)
     print("APOD Wallpaper Overlay - Automatic Application")
     print("=" * 60)
-    
-    # Get current wallpaper or download specific date
-    wallpaper_path = None
-    
-    # Fetch APOD data first to get the URL
-    print("\n2. Fetching APOD data from NASA...")
-    apod_data = fetch_apod_data(target_date_str)
-    
-    if not apod_data:
-        print("ERROR: Failed to fetch APOD data")
-        sys.exit(1)
-    
-    # ALWAYS download the image now (Standalone Mode)
-    print(f"\n   Retrieving APOD image for {apod_data.get('date')}...")
-    
-    if apod_data.get('media_type') == 'video':
-        print(f"WARNING: Media type is '{apod_data.get('media_type')}', attempting to extract or find video thumbnail.")
-        thumb = apod_data.get('thumbnail_url')
-        vid_url = apod_data.get('url', '')
-        
-        if thumb:
-            image_url = thumb
-        elif 'youtube.com/embed/' in vid_url:
-            vid_id = vid_url.split('embed/')[1].split('?')[0]
-            image_url = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
-        elif 'youtu.be/' in vid_url:
-            vid_id = vid_url.split('youtu.be/')[1].split('?')[0]
-            image_url = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
-        else:
-            image_url = vid_url
-    else:
-        image_url = apod_data.get('hdurl', apod_data.get('url'))
-    
-    if not image_url:
-        print("ERROR: No image URL found in APOD data")
-        sys.exit(1)
-            
-    # Download the image
-    wallpaper_path = download_apod_image(image_url, apod_data.get('date'))
 
-    if not wallpaper_path:
-        print("ERROR: Could not get wallpaper path (current or downloaded)")
+    print("\n2. Fetching APOD data from NASA...")
+    apod_data, wallpaper_path, offset = get_closest_apod_with_picture(target_date_str)
+    if not apod_data or not wallpaper_path:
+        print("ERROR: Failed to retrieve an APOD picture or its fallback.")
         sys.exit(1)
-    
-    if not os.path.exists(wallpaper_path):
-        print(f"ERROR: Wallpaper file does not exist: {wallpaper_path}")
-        sys.exit(1)
-    
+
     print(f"   Base Image: {wallpaper_path}")
-    
+    try:
+        with Image.open(wallpaper_path) as img:
+            img_w, img_h = img.size
+        file_size = os.path.getsize(wallpaper_path)
+        size_str = f"{file_size / (1024 * 1024):.2f} MB" if file_size >= 1024 * 1024 else f"{file_size / 1024:.1f} KB"
+        print(f"   Dimensions: {img_w}x{img_h} ({size_str})")
+    except Exception:
+        pass
+
     print(f"   Title: {apod_data.get('title', 'N/A')}")
-    print(f"   Date: {apod_data.get('date', 'N/A')}")
-    
-    # Generate output filename with date
-    apod_date = apod_data.get('date', datetime.now().strftime('%Y-%m-%d'))
-    output_filename = f"apod_wallpaper_{apod_date}.png"
-    composited_output = os.path.join(OUTPUT_DIR, output_filename)
-    
-    # Create composited image
+    if target_date_str and target_date_str != apod_data.get("date"):
+        print(f"   Date: {apod_data.get('date')} (Closest available to requested {target_date_str})")
+    else:
+        print(f"   Date: {apod_data.get('date', 'N/A')}")
+
+    apod_date = apod_data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    composited_output = os.path.join(OUTPUT_DIR, f"apod_wallpaper_{apod_date}.png")
+
     print("\n3. Creating overlay and compositing...")
-    success = composite_overlay_on_wallpaper(wallpaper_path, apod_data, composited_output)
-    
-    if not success:
+    if not composite_overlay_on_wallpaper(wallpaper_path, apod_data, composited_output, requested_date=target_date_str):
         print("ERROR: Failed to create composited image")
         sys.exit(1)
-    
-    # Set the new wallpaper
+
+    # Automatically remove intermediate raw image to conserve storage (keep only final wallpaper)
+    if wallpaper_path and os.path.exists(wallpaper_path) and os.path.basename(wallpaper_path).startswith("apod_image_"):
+        try:
+            os.remove(wallpaper_path)
+            print(f"   Removed intermediate raw image: {os.path.basename(wallpaper_path)}")
+        except Exception:
+            pass
+
     print("\n4. Setting new wallpaper...")
     if set_wallpaper(composited_output):
-        # Cleanup directory to keep it under the specified limit
         cleanup_directory(OUTPUT_DIR, MAX_STORAGE_MB)
-
         print("\n" + "=" * 60)
-        print("SUCCESS! Wallpaper with APOD overlay applied!")
+        if target_date_str and target_date_str != apod_data.get("date"):
+            print(f"SUCCESS! Wallpaper applied using closest available picture ({apod_data.get('date')})!")
+            print(f"         (Requested {target_date_str} had no picture)")
+        else:
+            print("SUCCESS! Wallpaper with APOD overlay applied!")
         print("=" * 60)
     else:
         print("\nERROR: Failed to set wallpaper")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
